@@ -4,8 +4,10 @@ tensorboardX
 tensorboard
 glob2
 tqdm
+arrow
 pandas
-sklearn
+scikit-learn
 plotly
 scipy
 numpy
+nltk
