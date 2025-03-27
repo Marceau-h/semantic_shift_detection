@@ -1,13 +1,14 @@
-import pandas as pd
-
-import pickle
-from sklearn.metrics.pairwise import cosine_similarity
-import plotly
-import plotly.graph_objs as go
-import numpy as np
-from scipy.stats.stats import pearsonr
 import argparse
 import os
+import pickle
+
+import numpy as np
+import pandas as pd
+import plotly
+import plotly.graph_objs as go
+from scipy.stats.stats import pearsonr
+from sklearn.metrics.pairwise import cosine_similarity
+
 
 def get_shifts(input_path):
     shifts_dict = {}
@@ -18,7 +19,6 @@ def get_shifts(input_path):
 
 
 def get_cos_dist(words, shifts_dict, path, years):
-
     cds = []
     shifts = []
     word_list = []
@@ -42,15 +42,12 @@ def get_cos_dist(words, shifts_dict, path, years):
         shifts.append(shifts_dict[w])
         word_list.append(w)
 
-
     return cds, shifts, word_list
 
 
-def visualize(x,y, words):
-
+def visualize(x, y, words):
     coef = np.polyfit(x, y, 1)
     poly1d_fn = np.poly1d(coef)
-
 
     trace0 = go.Scatter(
         x=x,
@@ -80,8 +77,8 @@ def visualize(x,y, words):
     )
 
     layout = dict(title='Correlation between gs semantic shifts and calculated shifts',
-                  yaxis=dict(zeroline=False, title= 'Semantic shift index', title_font = {"size": 20},),
-                  xaxis=dict(zeroline=False, title= 'Cosine distance', title_font = {"size": 20},),
+                  yaxis=dict(zeroline=False, title='Semantic shift index', title_font={"size": 20}, ),
+                  xaxis=dict(zeroline=False, title='Cosine distance', title_font={"size": 20}, ),
                   hovermode='closest',
 
                   )
@@ -103,20 +100,20 @@ if __name__ == "__main__":
                         default='data/liverpool/liverpool_shift.csv')
     args = parser.parse_args()
 
-
     years = ['2013', '2017']
 
     shifts_dict = get_shifts(args.shifts_path)
     words = list(shifts_dict.keys())
     cds, shifts, words = get_cos_dist(words, shifts_dict, args.embeddings_path, years)
 
-    #don't add text to the graph for these words, makes graph less messy
-    dont_draw_list = ['stubbornness', 'tourists', 'semifinals', 'desert', 'talents', 'scorpion',
-                      'seeded', 'vomit', 'naked', 'strings', 'alternatives', 'leaks', 'bait', 'erect', 'graduate',
-                      'travel', 'determine', 'explaining', 'soak', 'mouthpuiece', 'congestion', 'revisionism', 'slave',
-                      'revisonist', 'emotion', 'behaviour', 'listen', 'sentence', 'voice', 'relieved', 'mouthpiece', 'astonishing',
-                      'participate', 'implied', 'astonishing', 'revisionist', 'patient', 'preventing', 'accomplish', 'narrative',
-                      'listened', 'egyptian', 'clenched', 'croatian']
+    # don't add text to the graph for these words, makes graph less messy
+    dont_draw_list = [
+        'stubbornness', 'tourists', 'semifinals', 'desert', 'talents', 'scorpion', 'seeded', 'vomit', 'naked',
+        'strings', 'alternatives', 'leaks', 'bait', 'erect', 'graduate', 'travel', 'determine', 'explaining', 'soak',
+        'mouthpuiece', 'congestion', 'revisionism', 'slave', 'revisonist', 'emotion', 'behaviour', 'listen', 'sentence',
+        'voice', 'relieved', 'mouthpiece', 'astonishing', 'participate', 'implied', 'astonishing', 'revisionist',
+        'patient', 'preventing', 'accomplish', 'narrative', 'listened', 'egyptian', 'clenched', 'croatian'
+    ]
 
     filtered_words = []
 
@@ -130,7 +127,3 @@ if __name__ == "__main__":
 
     print("Pearson coefficient: ", pearsonr(cds, shifts))
     visualize(cds, shifts, words)
-
-
-
-
