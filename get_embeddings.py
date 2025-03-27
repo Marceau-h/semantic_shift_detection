@@ -1,18 +1,21 @@
-import torch
-from transformers import BertTokenizer, BertModel
+import argparse
+import gc
+import pickle
+import re
+from os import popen
 
 import nltk
 import numpy as np
-import pickle
-import gc
-import re
 import pandas as pd
-import argparse
+import torch
+from tqdm.auto import tqdm
+from transformers import BertTokenizer, BertModel
 
-
-def remove_url(text, replace_token):
-    regex = 'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    return re.sub(regex, replace_token, text)
+url_regex = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
+restore_apostrophes = re.compile(r"\\([dtsm]|ve|ll)")
+normalize_space = re.compile(r"\s+")
+body_regex = re.compile(r"'body': (.*), 'parent_id':")
+title_regex = re.compile(r"'title': (.*), 'subreddit':")
 
 
 def chunks(l, n):
@@ -28,68 +31,54 @@ def get_shifts(input_path):
         shifts_dict[row['word']] = row['shift_index']
     return shifts_dict
 
+
 def tokens_to_batches(ds, tokenizer, batch_size, max_length):
+    try:
+        sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+    except LookupError:
+        nltk.download('punkt')
+        sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+
+    line_number = popen("wc -l " + ds).read().split()[0]
+
+    print(f"Dataset path: {ds}, number of lines: {line_number}")
 
     batches = []
     batch = []
     batch_counter = 0
-    sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
-
-    print('Dataset: ', ds)
-    counter = 0
 
     with open(ds, 'r', encoding='utf8') as f:
+        pbar = tqdm(f, total=int(line_number), desc='Tokenizing', unit='lines')
 
-        for line in f:
-            counter += 1
+        for line in pbar:
+            content = body_regex.search(line)
+            content = content.groups()[0] if content else ''
 
-            if counter % 1000 == 0:
-                print('Num articles: ', counter)
+            title = title_regex.search(line)
+            title = title.groups()[0] if title else ''
 
-            content = re.search("'body': (.*), 'parent_id':", line)
+            text = f"{title} {content}"
 
-            if content:
-                content = content.groups()[0]
-            else:
-                content = ''
-            title = re.search("'title': (.*), 'subreddit':", line)
-            if title:
-                title = title.groups()[0]
-            else:
-                title = ''
-
-            text = title + ' ' + content
-
-            text = remove_url(text, '')
-
-            text = text.replace("\d", "'d")
-            text = text.replace("\\t", "'t")
-            text = text.replace("\s", "'s")
-            text = text.replace("\ll", "'ll")
-            text = text.replace("\m", "'m")
-            text = text.replace("\\ve", "'ve")
+            text = url_regex.sub('', text)
+            text = restore_apostrophes.sub(r"'\1", text)
             text = text.replace("[deleted]", "")
-            text = " ".join(text.split())
-
+            text = normalize_space.sub(" ", text)
 
             sents = []
-
             for sent in sent_tokenizer.tokenize(text):
                 sent = sent.strip().lower()
 
-                marked_sent = "[CLS] " + sent + " [SEP]"
+                marked_sent = f"[CLS] {sent} [SEP]"
                 sents.append(marked_sent)
-
 
             marked_text = " ".join(sents)
 
             tokenized_text = tokenizer.tokenize(marked_text)
 
             for i in range(0, len(tokenized_text), max_length):
-
                 batch_counter += 1
-                input_sequence = tokenized_text[i:i + max_length]
 
+                input_sequence = tokenized_text[i:i + max_length]
                 indexed_tokens = tokenizer.convert_tokens_to_ids(input_sequence)
 
                 batch.append((indexed_tokens, input_sequence))
@@ -106,15 +95,11 @@ def tokens_to_batches(ds, tokenizer, batch_size, max_length):
 
 
 def get_token_embeddings(batches, model, batch_size):
-
     token_embeddings = []
     tokenized_text = []
     counter = 0
 
     for batch in batches:
-        counter += 1
-        if counter % 1000 == 0:
-            print('Generating embedding for batch: ', counter)
         lens = [len(x[0]) for x in batch]
         max_len = max(lens)
         tokens_tensor = torch.zeros(batch_size, max_len, dtype=torch.long).cuda()
@@ -131,8 +116,7 @@ def get_token_embeddings(batches, model, batch_size):
         # Predict hidden states features for each layer
         with torch.no_grad():
             model_output = model(tokens_tensor, segments_tensors)
-            encoded_layers = model_output[-1][-4:] #last four layers of the encoder
-
+            encoded_layers = model_output[-1][-4:]  # last four layers of the encoder
 
         for batch_i in range(batch_size):
 
@@ -167,10 +151,7 @@ def average_save_and_print(vocab_vectors, save_path):
         pickle.dump(vocab_vectors, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-
-
 def get_time_embeddings(embeddings_path, datasets, tokenizer, model, batch_size, max_length):
-
     vocab_vectors = {}
     vocab_vectors_avg = {}
 
@@ -182,9 +163,11 @@ def get_time_embeddings(embeddings_path, datasets, tokenizer, model, batch_size,
         chunked_batches = chunks(all_batches, 1000)
         num_chunk = 0
 
-        for batches in chunked_batches:
+        pbar = tqdm(chunked_batches, desc='Chunking', unit='chunks', total=len(all_batches) // 1000 + 1)
+
+        for batches in pbar:
             num_chunk += 1
-            print('Chunk ', num_chunk)
+            # print('Chunk ', num_chunk)
 
             token_embeddings, tokenized_text = get_token_embeddings(batches, model, batch_size)
 
@@ -219,7 +202,6 @@ def get_time_embeddings(embeddings_path, datasets, tokenizer, model, batch_size,
                         sarray = splitted_array / len(splitted_tokens)
                         stoken_i = "".join(splitted_tokens).replace('##', '')
 
-
                         if stoken_i + '_' + year in vocab_vectors:
                             vocab_vectors[stoken_i + '_' + year][0] += sarray
                             vocab_vectors[stoken_i + '_' + year][1] += 1
@@ -247,8 +229,6 @@ def get_time_embeddings(embeddings_path, datasets, tokenizer, model, batch_size,
     gc.collect()
 
 
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=16)
@@ -258,7 +238,7 @@ if __name__ == '__main__':
                         default='models/model_liverpool/pytorch_model.bin')
     parser.add_argument('--path_to_datasets', type=str,
                         help='Paths to each of the time period specific corpus separated by ;',
-                        default='data/liverpool/LiverpoolFC_2013.txt;data/liverpool/LiverpoolFC_2017.txt',)
+                        default='data/liverpool/LiverpoolFC_2013.txt;data/liverpool/LiverpoolFC_2017.txt', )
     parser.add_argument('--embeddings_path', type=str,
                         help='Path to output time embeddings',
                         default='embeddings/liverpool.pickle')
@@ -282,6 +262,4 @@ if __name__ == '__main__':
 
     get_time_embeddings(embeddings_path, datasets, tokenizer, model, args.batch_size, args.max_length)
 
-    #Pearson coefficient:  (0.4680305011683137, 1.3380286367013385e-06) 84036
-
-
+    # Pearson coefficient:  (0.4680305011683137, 1.3380286367013385e-06) 84036
