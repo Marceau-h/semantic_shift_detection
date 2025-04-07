@@ -187,7 +187,7 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
         tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
     ]
     probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
-    if tokenizer._pad_token is not None:
+    if tokenizer.pad_token is not None:
         padding_mask = labels.eq(tokenizer.pad_token_id)
         probability_matrix.masked_fill_(padding_mask, value=0.0)
     masked_indices = torch.bernoulli(probability_matrix).bool()
@@ -214,7 +214,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
     def collate(examples: List[torch.Tensor]):
-        if tokenizer._pad_token is None:
+        if tokenizer.pad_token is None:
             return pad_sequence(examples, batch_first=True)
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
@@ -416,7 +416,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     # Note that DistributedSampler samples randomly
 
     def collate(examples: List[torch.Tensor]):
-        if tokenizer._pad_token is None:
+        if tokenizer.pad_token is None:
             return pad_sequence(examples, batch_first=True)
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
@@ -443,7 +443,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
         labels = labels.to(args.device)
 
         with torch.no_grad():
-            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
+            outputs = model(inputs, labels=labels) if args.mlm else model(inputs, labels=labels)
             lm_loss = outputs[0]
             eval_loss += lm_loss.mean().item()
         nb_eval_steps += 1
