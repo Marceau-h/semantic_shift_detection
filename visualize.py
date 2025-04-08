@@ -11,11 +11,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 
 def get_shifts(input_path):
-    shifts_dict = {}
-    df_shifts = pd.read_csv(input_path, sep=',', encoding='utf8')
-    for idx, row in df_shifts.iterrows():
-        shifts_dict[row['word']] = row['shift_index']
-    return shifts_dict
+    return {
+        row['word']: row['shift_index']
+        for _, row in pd.read_csv(
+            input_path, sep=',', encoding='utf8'
+        ).iterrows()
+    }
 
 
 def get_cos_dist(words, shifts_dict, path, years):
@@ -27,11 +28,10 @@ def get_cos_dist(words, shifts_dict, path, years):
         vocab_vectors = pickle.load(f)
 
     for w in words:
-
         words_emb = []
 
         for year in years:
-            year_word = w + '_' + year
+            year_word = f"{w}_{year}"
             if year_word in vocab_vectors:
                 words_emb.append(vocab_vectors[year_word])
 
@@ -104,26 +104,28 @@ if __name__ == "__main__":
 
     shifts_dict = get_shifts(args.shifts_path)
     words = list(shifts_dict.keys())
-    cds, shifts, words = get_cos_dist(words, shifts_dict, args.embeddings_path, years)
+    cosine_dists, shifts, words = get_cos_dist(words, shifts_dict, args.embeddings_path, years)
 
     # don't add text to the graph for these words, makes graph less messy
-    dont_draw_list = [
+    dont_draw = {
         'stubbornness', 'tourists', 'semifinals', 'desert', 'talents', 'scorpion', 'seeded', 'vomit', 'naked',
         'strings', 'alternatives', 'leaks', 'bait', 'erect', 'graduate', 'travel', 'determine', 'explaining', 'soak',
         'mouthpuiece', 'congestion', 'revisionism', 'slave', 'revisonist', 'emotion', 'behaviour', 'listen', 'sentence',
         'voice', 'relieved', 'mouthpiece', 'astonishing', 'participate', 'implied', 'astonishing', 'revisionist',
         'patient', 'preventing', 'accomplish', 'narrative', 'listened', 'egyptian', 'clenched', 'croatian'
-    ]
+    }
 
-    filtered_words = []
+    # filtered_words = []
+    #
+    # for w in words:
+    #     if w in dont_draw_list:
+    #         filtered_words.append('')
+    #     else:
+    #         filtered_words.append(w)
+    #
+    # words = filtered_words
 
-    for w in words:
-        if w in dont_draw_list:
-            filtered_words.append('')
-        else:
-            filtered_words.append(w)
+    words = [w if w not in dont_draw else '' for w in words]
 
-    words = filtered_words
-
-    print("Pearson coefficient: ", pearsonr(cds, shifts))
-    visualize(cds, shifts, words)
+    print("Pearson coefficient: ", pearsonr(cosine_dists, shifts))
+    visualize(cosine_dists, shifts, words)
