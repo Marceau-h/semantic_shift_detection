@@ -3,10 +3,11 @@ import gc
 import pickle
 import re
 from os import popen
+from typing import List
 
-import nltk
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 from tqdm.auto import tqdm
 from transformers import BertTokenizer, BertModel
@@ -16,6 +17,11 @@ restore_apostrophes = re.compile(r"\\([dtsm]|ve|ll)")
 normalize_space = re.compile(r"\s+")
 body_regex = re.compile(r"'body': (.*), 'parent_id':")
 title_regex = re.compile(r"'title': (.*), 'subreddit':")
+
+
+def ceildiv(a, b):
+    """Cf. https://stackoverflow.com/questions/14822184/is-there-a-ceiling-equivalent-of-operator-in-python"""
+    return -(a // -b)
 
 
 def chunks(l, n):
@@ -32,13 +38,28 @@ def get_shifts(input_path):
     return shifts_dict
 
 
-def tokens_to_batches(ds, tokenizer, batch_size, max_length):
-    try:
-        sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
-    except LookupError:
-        nltk.download('punkt')
-        sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+def fuze_cols(col: pl.Struct) -> str:
+    return f"{col['title'] or ''} {col['body'] or ''}"
 
+
+def transform_text(text: str, sent_tokenizer) -> List[str]:
+    text = url_regex.sub('', text)
+    text = restore_apostrophes.sub(r"'\1", text)
+    text = text.replace("[deleted]", "")
+    text = normalize_space.sub(" ", text)
+    sents = []
+    for sent in sent_tokenizer(text):
+        sent = sent.strip().lower()
+
+        marked_sent = f"[CLS] {sent} [SEP]"
+        sents.append(marked_sent)
+
+    marked_text = " ".join(sents)
+
+    return tokenizer.tokenize(marked_text)
+
+
+def tokens_to_batches(ds, tokenizer, batch_size, max_length, sent_tokenizer):
     line_number = popen("wc -l " + ds).read().split()[0]
 
     print(f"Dataset path: {ds}, number of lines: {line_number}")
@@ -47,45 +68,30 @@ def tokens_to_batches(ds, tokenizer, batch_size, max_length):
     batch = []
     batch_counter = 0
 
-    with open(ds, 'r', encoding='utf8') as f:
-        pbar = tqdm(f, total=int(line_number), desc='Tokenizing', unit='lines')
+    df = pl.read_ndjson(ds).select(
+        pl.struct(pl.col('body'), pl.col('title')).map_elements(
+            fuze_cols, return_dtype=pl.Utf8
+        ).map_elements(
+            lambda x: transform_text(x, sent_tokenizer), return_dtype=pl.List(pl.Utf8)
+        ).alias('text')
+    )
 
-        for line in pbar:
-            content = body_regex.search(line)
-            content = content.groups()[0] if content else ''
+    print(f"Dataset path: {ds}, real number of lines: {len(df)}")
 
-            title = title_regex.search(line)
-            title = title.groups()[0] if title else ''
+    for _, row in enumerate(df.iter_rows()):
+        tokenized_text = row[0]
 
-            text = f"{title} {content}"
+        for i in range(0, len(tokenized_text), max_length):
+            batch_counter += 1
 
-            text = url_regex.sub('', text)
-            text = restore_apostrophes.sub(r"'\1", text)
-            text = text.replace("[deleted]", "")
-            text = normalize_space.sub(" ", text)
+            input_sequence = tokenized_text[i: i + max_length]
+            indexed_tokens = tokenizer.convert_tokens_to_ids(input_sequence)
 
-            sents = []
-            for sent in sent_tokenizer.tokenize(text):
-                sent = sent.strip().lower()
+            batch.append((indexed_tokens, input_sequence))
 
-                marked_sent = f"[CLS] {sent} [SEP]"
-                sents.append(marked_sent)
-
-            marked_text = " ".join(sents)
-
-            tokenized_text = tokenizer.tokenize(marked_text)
-
-            for i in range(0, len(tokenized_text), max_length):
-                batch_counter += 1
-
-                input_sequence = tokenized_text[i:i + max_length]
-                indexed_tokens = tokenizer.convert_tokens_to_ids(input_sequence)
-
-                batch.append((indexed_tokens, input_sequence))
-
-                if batch_counter % batch_size == 0:
-                    batches.append(batch)
-                    batch = []
+            if batch_counter % batch_size == 0:
+                batches.append(batch)
+                batch = []
 
     print()
     print('Tokenization done!')
@@ -97,7 +103,7 @@ def tokens_to_batches(ds, tokenizer, batch_size, max_length):
 def get_token_embeddings(batches, model, batch_size):
     token_embeddings = []
     tokenized_text = []
-    counter = 0
+    # counter = 0
 
     for batch in batches:
         lens = [len(x[0]) for x in batch]
@@ -108,10 +114,12 @@ def get_token_embeddings(batches, model, batch_size):
         batch_tokens = [x[1] for x in batch]
 
         for i in range(batch_size):
-            length = len(batch_idx[i])
-            for j in range(max_len):
-                if j < length:
-                    tokens_tensor[i][j] = batch_idx[i][j]
+            # length = len(batch_idx[i])
+            # for j in range(max_len):
+            #     if j < length:
+            #         tokens_tensor[i][j] = batch_idx[i][j]
+            for j in range(min(len(batch_idx[i]), max_len)):
+                tokens_tensor[i][j] = batch_idx[i][j]
 
         # Predict hidden states features for each layer
         with torch.no_grad():
@@ -119,13 +127,10 @@ def get_token_embeddings(batches, model, batch_size):
             encoded_layers = model_output[-1][-4:]  # last four layers of the encoder
 
         for batch_i in range(batch_size):
-
             # For each token in the sentence...
             for token_i in range(len(batch_tokens[batch_i])):
-
                 # Holds last 4 layers of hidden states for each token
                 hidden_layers = []
-
                 for layer_i in range(len(encoded_layers)):
                     # Lookup the vector for `token_i` in `layer_i`
                     vec = encoded_layers[layer_i][batch_i][token_i]
@@ -142,7 +147,6 @@ def get_token_embeddings(batches, model, batch_size):
 
 def average_save_and_print(vocab_vectors, save_path):
     for k, v in vocab_vectors.items():
-
         if len(v) == 2:
             avg = v[0] / v[1]
             vocab_vectors[k] = avg
@@ -151,19 +155,18 @@ def average_save_and_print(vocab_vectors, save_path):
         pickle.dump(vocab_vectors, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def get_time_embeddings(embeddings_path, datasets, tokenizer, model, batch_size, max_length):
+def get_time_embeddings(embeddings_path, datasets, tokenizer, model, batch_size, max_length, sent_tokenizer):
     vocab_vectors = {}
-    vocab_vectors_avg = {}
+    # vocab_vectors_avg = {}
 
     for ds in datasets:
-
         year = ds[-8:-4]
 
-        all_batches = tokens_to_batches(ds, tokenizer, batch_size, max_length)
+        all_batches = tokens_to_batches(ds, tokenizer, batch_size, max_length, sent_tokenizer)
         chunked_batches = chunks(all_batches, 1000)
         num_chunk = 0
 
-        pbar = tqdm(chunked_batches, desc='Chunking', unit='chunks', total=len(all_batches) // 1000 + 1)
+        pbar = tqdm(chunked_batches, desc='Chunking', unit='chunks', total=ceildiv(len(all_batches), 1000))
 
         for batches in pbar:
             num_chunk += 1
@@ -225,7 +228,7 @@ def get_time_embeddings(embeddings_path, datasets, tokenizer, model, batch_size,
 
     average_save_and_print(vocab_vectors, embeddings_path)
     del vocab_vectors
-    del vocab_vectors_avg
+    # del vocab_vectors_avg
     gc.collect()
 
 
@@ -238,13 +241,14 @@ if __name__ == '__main__':
                         default='models/model_liverpool/pytorch_model.bin')
     parser.add_argument('--path_to_datasets', type=str,
                         help='Paths to each of the time period specific corpus separated by ;',
-                        default='data/liverpool/LiverpoolFC_2013.txt;data/liverpool/LiverpoolFC_2017.txt', )
+                        default='data/liverpool/LiverpoolFC_2013.jsonl;data/liverpool/LiverpoolFC_2017.jsonl', )
     parser.add_argument('--embeddings_path', type=str,
                         help='Path to output time embeddings',
                         default='embeddings/liverpool.pickle')
     parser.add_argument('--shifts_path', type=str,
                         help='Path to gold standard semantic shifts path',
                         default='data/liverpool/liverpool_shift.csv')
+    parser.add_argument('--spacy_model', type=str, )
     args = parser.parse_args()
 
     datasets = args.path_to_datasets.split(';')
@@ -260,6 +264,20 @@ if __name__ == '__main__':
 
     shifts_dict = get_shifts(args.shifts_path)
 
-    get_time_embeddings(embeddings_path, datasets, tokenizer, model, args.batch_size, args.max_length)
+    if args.spacy_model and False:
+        import spacy
+
+        model = spacy.load(args.spacy_model)
+        sent_tokenizer = lambda x: (sent.text for sent in model(x).sents)
+    else:
+        import nltk
+
+        try:
+            sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle').tokenize
+        except LookupError:
+            nltk.download('punkt')
+            sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle').tokenize
+
+    get_time_embeddings(embeddings_path, datasets, tokenizer, model, args.batch_size, args.max_length, sent_tokenizer)
 
     # Pearson coefficient:  (0.4680305011683137, 1.3380286367013385e-06) 84036
